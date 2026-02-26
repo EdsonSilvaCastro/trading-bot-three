@@ -43,8 +43,11 @@ let recentSweeps: Sweep[] = [];
 let currentBias: DailyBias | null = null;
 
 // Phase 3 execution state
-const positionManager = new PositionManager(true); // Paper mode
 let accountBalance = parseFloat(process.env['PAPER_BALANCE'] ?? '10000');
+const positionManager = new PositionManager(true, (pnl) => {
+  accountBalance += pnl;
+  log.info(`TP1 partial PnL applied: ${pnl >= 0 ? '+' : ''}${pnl.toFixed(2)} USDT | Balance: $${accountBalance.toFixed(2)}`);
+});
 
 // --------------- Startup ---------------
 

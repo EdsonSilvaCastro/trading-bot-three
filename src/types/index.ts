@@ -175,7 +175,7 @@ export interface Session {
 // --------------- Trades ---------------
 
 export type TradeDirection = 'LONG' | 'SHORT';
-export type TradeStatus = 'PENDING' | 'OPEN' | 'TP1_HIT' | 'TP2_HIT' | 'STOPPED' | 'MANUAL' | 'TIME_EXIT';
+export type TradeStatus = 'PENDING' | 'OPEN' | 'TP1_HIT' | 'TP2_HIT' | 'STOPPED' | 'MANUAL' | 'TIME_EXIT' | 'STRUCTURAL' | 'KILLED';
 
 export interface Trade {
   id: string;

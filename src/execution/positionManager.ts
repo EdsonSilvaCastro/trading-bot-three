@@ -5,7 +5,7 @@
 // Holds the isPaperMode flag for easy Phase 4 real-execution switch.
 // ============================================================
 
-import { Trade, StructureState } from '../types/index.js';
+import { Trade, StructureState, TradeStatus } from '../types/index.js';
 import { checkRiskAllowance, recordTradeResult, isKillSwitchActive } from './riskManager.js';
 import { openPaperTrade, updatePaperPositions, forceClosePaperPosition, getOpenPositions } from './paperTrader.js';
 import { evaluateExit } from '../engine/exitStrategy.js';
@@ -17,9 +17,14 @@ const log = createModuleLogger('PositionManager');
 
 export class PositionManager {
   private readonly isPaperMode: boolean;
+  private readonly onPartialPnL: (pnl: number) => void;
 
-  constructor(paperMode: boolean = true) {
+  constructor(
+    paperMode: boolean = true,
+    onPartialPnL: (pnl: number) => void = () => {},
+  ) {
     this.isPaperMode = paperMode;
+    this.onPartialPnL = onPartialPnL;
     log.info(`PositionManager initialised (${paperMode ? 'PAPER' : 'LIVE'} mode)`);
   }
 
@@ -99,7 +104,12 @@ export class PositionManager {
     const killSwitch = isKillSwitchActive();
 
     // 1. Update paper positions (fill detection + TP/SL/time exits)
-    const { closedTrades, alerts } = updatePaperPositions(currentPrice, currentTime);
+    const { closedTrades, alerts, partialPnlRealized } = updatePaperPositions(currentPrice, currentTime);
+
+    // Immediately reflect TP1 partial close in account balance
+    if (partialPnlRealized !== 0) {
+      this.onPartialPnL(partialPnlRealized);
+    }
 
     // 2. Process trades that were closed by the paper trader
     for (const trade of closedTrades) {
@@ -127,7 +137,7 @@ export class PositionManager {
 
       // KILL_SWITCH: handled by paperTrader's next update, but force now
       if (exitDecision.reason === 'KILL_SWITCH' || exitDecision.reason === 'STRUCTURAL') {
-        const reason = exitDecision.reason === 'KILL_SWITCH' ? 'MANUAL' : 'MANUAL';
+        const reason: TradeStatus = exitDecision.reason === 'KILL_SWITCH' ? 'KILLED' : 'STRUCTURAL';
         const closed = forceClosePaperPosition(
           pos.trade.id,
           exitDecision.exitPrice ?? currentPrice,

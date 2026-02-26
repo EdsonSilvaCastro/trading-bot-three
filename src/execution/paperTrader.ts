@@ -191,7 +191,13 @@ export function openPaperTrade(
  * Update all open paper positions based on current price.
  * Called every 5 minutes during the analysis cycle.
  *
- * Returns closed trades and any alerts to send via Telegram.
+ * Returns closed trades, alerts to send, and any PnL realized from TP1 partial
+ * closes so the caller can update the account balance immediately.
+ *
+ * NOTE: SL/TP/time exit logic is also in exitStrategy.ts.
+ * The paper trader handles these exits directly for simplicity.
+ * exitStrategy.ts is used by positionManager for STRUCTURAL exits only.
+ * TODO Phase 4: consolidate into a single exit path.
  *
  * @param currentPrice - Latest market price
  * @param currentTime  - Current UTC time (for time-based exits)
@@ -199,9 +205,10 @@ export function openPaperTrade(
 export function updatePaperPositions(
   currentPrice: number,
   currentTime: Date,
-): { closedTrades: Trade[]; alerts: string[] } {
+): { closedTrades: Trade[]; alerts: string[]; partialPnlRealized: number } {
   const closedTrades: Trade[] = [];
   const alerts: string[] = [];
+  let partialPnlRealized = 0;
 
   const isTimeExit = checkTimeExit(currentTime);
 
@@ -291,6 +298,7 @@ export function updatePaperPositions(
         );
 
         pos.partialPnlUsdt += tp1Pnl;
+        partialPnlRealized += tp1Pnl; // Propagate to caller for balance update
         pos.tp1Executed = true;
         pos.trade.tp1Hit = true;
         pos.trade.status = 'TP1_HIT';
@@ -314,7 +322,7 @@ export function updatePaperPositions(
     }
   }
 
-  return { closedTrades, alerts };
+  return { closedTrades, alerts, partialPnlRealized };
 }
 
 /**
