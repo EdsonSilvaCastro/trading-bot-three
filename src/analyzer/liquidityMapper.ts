@@ -320,9 +320,13 @@ export function updateLiquidityStates(
       return { ...level, state: 'EXPIRED' };
     }
 
-    // Check if swept by any recent candle
+    // Check if swept by candles that formed AFTER the level was created.
+    // Skipping older candles prevents the level from being instantly swept by
+    // historical candles that pre-date the level's existence.
     const isHighLevel = HIGH_TYPES.has(level.type);
     for (const candle of latestCandles) {
+      if (candle.timestamp.getTime() <= level.timestamp.getTime()) continue;
+
       const swept = isHighLevel
         ? candle.high >= level.level // High level swept when price runs above it
         : candle.low <= level.level; // Low level swept when price runs below it

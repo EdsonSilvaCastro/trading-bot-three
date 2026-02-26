@@ -28,6 +28,7 @@ import type {
   Swing,
   Timeframe,
   Sweep,
+  StructureEvent,
 } from './types/index.js';
 
 const log = createModuleLogger('Main');
@@ -44,6 +45,12 @@ let currentBias: DailyBias | null = null;
 
 // Phase 3 execution state
 let accountBalance = parseFloat(process.env['PAPER_BALANCE'] ?? '10000');
+
+/** Debounce cache — prevents the same SMS/CHOCH from re-firing every 5 min cycle */
+const lastSMSEvent: Partial<Record<Timeframe, {
+  event: StructureEvent;
+  swingCount: number; // Number of swings when the event was first detected
+}>> = {};
 const positionManager = new PositionManager(true, (pnl) => {
   accountBalance += pnl;
   log.info(`TP1 partial PnL applied: ${pnl >= 0 ? '+' : ''}${pnl.toFixed(2)} USDT | Balance: $${accountBalance.toFixed(2)}`);
@@ -256,7 +263,9 @@ async function runAnalysisCycle(): Promise<void> {
       swingCache as Record<Timeframe, Swing[]>,
       buildSessionHighLows(),
     );
+    log.info(`Liquidity mapped: ${liquidityLevels.length} total levels`);
     liquidityLevels = updateLiquidityStates(liquidityLevels, candles5m.slice(-10));
+    log.info(`Liquidity after state update: ${liquidityLevels.filter((l) => l.state === 'ACTIVE').length} active / ${liquidityLevels.length} total`);
 
     // 2. Scan for sweeps
     const newSweeps = scanForSweeps(
@@ -276,9 +285,11 @@ async function runAnalysisCycle(): Promise<void> {
     const structure15m = analyzeStructure(candles15m, swingCache['15m'] ?? []);
     const structure5m = analyzeStructure(candles5m, swingCache['5m'] ?? []);
 
-    // 5. SMS detection
-    const sms15m = detectSMS('15m', candles15m, swingCache['15m'] ?? []);
-    const sms5m = detectSMS('5m', candles5m, swingCache['5m'] ?? []);
+    // 5. SMS detection (debounced — only fires once per structural event, not every cycle)
+    const sms15mRaw = detectSMS('15m', candles15m, swingCache['15m'] ?? []);
+    const sms5mRaw = detectSMS('5m', candles5m, swingCache['5m'] ?? []);
+    const sms15m = debounceSMS('15m', sms15mRaw, swingCache['15m'] ?? []);
+    const sms5m = debounceSMS('5m', sms5mRaw, swingCache['5m'] ?? []);
     if (sms15m !== 'NONE' || sms5m !== 'NONE') {
       log.info(`SMS! 15M: ${sms15m} | 5M: ${sms5m}`);
       structure15m.lastEvent = sms15m;
@@ -350,6 +361,39 @@ function buildBiasContext(): BiasContext {
     currentPrice: candleCache['5m']?.slice(-1)[0]?.close ?? 0,
     currentSession: getCurrentSession(),
   };
+}
+
+/**
+ * Prevent the same SMS/CHOCH event from firing on every 5-min cycle.
+ *
+ * An SMS is a one-time structural event. It is considered "new" only when:
+ *   - No prior event was recorded for this timeframe, OR
+ *   - New swings have formed since the last event (swing count increased), OR
+ *   - The event direction changed (was BULLISH, now BEARISH or vice-versa)
+ *
+ * BMS events (trend continuation) are intentionally NOT debounced here because
+ * they are not entry triggers and are filtered downstream.
+ *
+ * @param tf    - Timeframe being evaluated
+ * @param event - Raw StructureEvent from detectSMS
+ * @param swings - Current swing array for this timeframe
+ */
+function debounceSMS(tf: Timeframe, event: StructureEvent, swings: Swing[]): StructureEvent {
+  if (event === 'NONE') return 'NONE';
+
+  const prev = lastSMSEvent[tf];
+  const currentSwingCount = swings.length;
+
+  if (prev) {
+    // Suppress if same event AND swing count hasn't changed (candles are the same)
+    if (prev.event === event && prev.swingCount === currentSwingCount) {
+      return 'NONE';
+    }
+  }
+
+  // New event — record and let it through
+  lastSMSEvent[tf] = { event, swingCount: currentSwingCount };
+  return event;
 }
 
 function buildSessionHighLows() {

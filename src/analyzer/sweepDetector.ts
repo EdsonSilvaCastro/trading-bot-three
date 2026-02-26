@@ -87,6 +87,11 @@ export function detectSweep(level: LiquidityLevel, candles: Candle[]): Sweep | n
 
     const extreme = isHighLevel ? candle.high : candle.low;
 
+    // EARLY REJECT: penetration > 1% is never a sweep — it's a real directional move.
+    // Guards against false matches with very old candles from the backfill window.
+    const penetrationPct = Math.abs(extreme - level.level) / level.level;
+    if (penetrationPct > 0.01) continue;
+
     // IMMEDIATE: same candle closes back on the correct side
     const immediateReversal = isHighLevel
       ? candle.close < level.level  // Ran above, closed below = BSL swept
@@ -98,8 +103,8 @@ export function detectSweep(level: LiquidityLevel, candles: Candle[]): Sweep | n
       const score = computeSweepScore(level, extreme, 0, bodyRatio);
       if (score === 0) continue; // Too deep to be valid
 
-      log.info(
-        `SWEEP [IMMEDIATE] ${level.type} @ ${level.level.toFixed(2)} | extreme=${extreme.toFixed(2)} | score=${score}`,
+      log.debug(
+        `SWEEP [IMMEDIATE] ${level.type} @ ${level.level.toFixed(2)} | extreme=${extreme.toFixed(2)} | pen=${(penetrationPct * 100).toFixed(3)}% | score=${score}`,
       );
 
       return {
@@ -127,8 +132,8 @@ export function detectSweep(level: LiquidityLevel, candles: Candle[]): Sweep | n
         const score = computeSweepScore(level, extreme, d, bodyRatio);
         if (score === 0) break; // Too deep
 
-        log.info(
-          `SWEEP [DELAYED +${d}] ${level.type} @ ${level.level.toFixed(2)} | extreme=${extreme.toFixed(2)} | score=${score}`,
+        log.debug(
+          `SWEEP [DELAYED +${d}] ${level.type} @ ${level.level.toFixed(2)} | extreme=${extreme.toFixed(2)} | pen=${(penetrationPct * 100).toFixed(3)}% | score=${score}`,
         );
 
         return {
@@ -161,6 +166,9 @@ export function scanForSweeps(levels: LiquidityLevel[], recentCandles: Candle[])
       const sweep = detectSweep(level, recentCandles);
       if (sweep && sweep.score >= SCORING_CONFIG.sweep.minScoreForTrigger) {
         sweeps.push(sweep);
+        log.info(
+          `QUALIFYING SWEEP: ${level.type} @ ${level.level.toFixed(2)} | score=${sweep.score} | ${sweep.confirmation} +${sweep.delay}`,
+        );
       }
     } catch (err) {
       log.warn(`sweepDetector error for ${level.type} @ ${level.level}: ${(err as Error).message}`);
