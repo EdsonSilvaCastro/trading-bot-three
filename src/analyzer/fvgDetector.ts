@@ -9,7 +9,6 @@
 // CE = consequent encroachment (50% midpoint of the gap).
 // ============================================================
 
-import { v4 as uuidv4 } from 'uuid';
 import { Candle, FairValueGap, FVGState, Timeframe } from '../types/index.js';
 import { SCORING_CONFIG } from '../config/scoring.js';
 import { scoreDisplacement } from './displacementScorer.js';
@@ -64,9 +63,11 @@ export function detectFVGs(candles: Candle[], timeframe: Timeframe): FairValueGa
       const bottom = prev.high;
       const top = next.low;
       const quality = assessFVGQuality(candles, i);
+      // Deterministic ID: same gap always produces the same ID so mergeFVGs deduplicates correctly
+      const id = `fvg_${curr.timestamp.getTime()}_${timeframe}_BULLISH_${bottom.toFixed(2)}_${top.toFixed(2)}`;
 
       fvgs.push({
-        id: uuidv4(),
+        id,
         timestamp: curr.timestamp,
         timeframe,
         type: 'BULLISH',
@@ -84,9 +85,10 @@ export function detectFVGs(candles: Candle[], timeframe: Timeframe): FairValueGa
       const top = prev.low;
       const bottom = next.high;
       const quality = assessFVGQuality(candles, i);
+      const id = `fvg_${curr.timestamp.getTime()}_${timeframe}_BEARISH_${bottom.toFixed(2)}_${top.toFixed(2)}`;
 
       fvgs.push({
-        id: uuidv4(),
+        id,
         timestamp: curr.timestamp,
         timeframe,
         type: 'BEARISH',

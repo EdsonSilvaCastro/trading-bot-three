@@ -245,8 +245,13 @@ export function computeDailyBias(ctx: BiasContext): DailyBias {
   // AMD Phase
   const amdPhase = determineAMDPhase(fourHourCandles, currentPrice, currentSession, bias);
 
+  // Both TFs agree when Daily is not UNDEFINED and explicitly matches 4H direction
+  const bothTFAgree =
+    (trend4h === 'BULLISH' && trendDaily === 'BULLISH') ||
+    (trend4h === 'BEARISH' && trendDaily === 'BEARISH');
+
   log.info(
-    `Bias: ${bias} | 4H=${trend4h} Daily=${trendDaily} | B1=${b1Framework} | AMD=${amdPhase} | Zone=${b3Zone}`,
+    `Bias: ${bias} | 4H=${trend4h} Daily=${trendDaily} bothTFAgree=${bothTFAgree} | B1=${b1Framework} | AMD=${amdPhase} | Zone=${b3Zone}`,
   );
 
   return {
@@ -258,6 +263,7 @@ export function computeDailyBias(ctx: BiasContext): DailyBias {
     b3Depth,
     bias,
     amdPhase,
+    bothTFAgree,
   };
 }
 

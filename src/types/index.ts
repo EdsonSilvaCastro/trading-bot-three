@@ -146,6 +146,8 @@ export interface DailyBias {
   b3Depth: number; // 0-1, how deep in the zone
   bias: BiasDirection;
   amdPhase: AMDPhase;
+  /** True when both Daily AND 4H structure agree on direction (+20 confidence vs +10) */
+  bothTFAgree: boolean;
 }
 
 // --------------- Sessions ---------------

@@ -8,7 +8,6 @@
 // Elephant would jump into a Children's pool."
 // ============================================================
 
-import { v4 as uuidv4 } from 'uuid';
 import { Candle, DisplacementResult, FairValueGap, Timeframe } from '../types/index.js';
 import { SCORING_CONFIG } from '../config/scoring.js';
 import { createModuleLogger } from '../monitoring/logger.js';
@@ -75,7 +74,7 @@ export function detectFVGsInRange(
       const bottom = prev.high;
       const top = next.low;
       fvgs.push({
-        id: uuidv4(),
+        id: `fvg_${curr.timestamp.getTime()}_${timeframe}_BULLISH_${bottom.toFixed(2)}_${top.toFixed(2)}`,
         timestamp: curr.timestamp,
         timeframe,
         type: 'BULLISH',
@@ -93,7 +92,7 @@ export function detectFVGsInRange(
       const top = prev.low;
       const bottom = next.high;
       fvgs.push({
-        id: uuidv4(),
+        id: `fvg_${curr.timestamp.getTime()}_${timeframe}_BEARISH_${bottom.toFixed(2)}_${top.toFixed(2)}`,
         timestamp: curr.timestamp,
         timeframe,
         type: 'BEARISH',

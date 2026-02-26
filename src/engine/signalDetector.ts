@@ -233,21 +233,19 @@ export function detectSignal(ctx: SignalContext): TradingSignal | null {
     return null;
   }
 
-  // 4. Confirm SMS on 15M or 5M (structure shifted after sweep)
+  // 4. Require confirmed SMS on 15M or 5M.
+  // CHOCH alone does NOT qualify — it lacks the displacement confirmation that proves
+  // the structure break is real and not a fakeout.
   const has15mSMS =
     structureState15m.lastEvent === 'SMS_BULLISH' ||
-    structureState15m.lastEvent === 'SMS_BEARISH' ||
-    structureState15m.lastEvent === 'CHOCH_BULLISH' ||
-    structureState15m.lastEvent === 'CHOCH_BEARISH';
+    structureState15m.lastEvent === 'SMS_BEARISH';
 
   const has5mSMS =
     structureState5m.lastEvent === 'SMS_BULLISH' ||
-    structureState5m.lastEvent === 'SMS_BEARISH' ||
-    structureState5m.lastEvent === 'CHOCH_BULLISH' ||
-    structureState5m.lastEvent === 'CHOCH_BEARISH';
+    structureState5m.lastEvent === 'SMS_BEARISH';
 
   if (!has15mSMS && !has5mSMS) {
-    log.debug('detectSignal: no SMS/CHOCH on 5M or 15M');
+    log.debug('detectSignal: no confirmed SMS on 5M or 15M (CHOCH without displacement rejected)');
     return null;
   }
 
@@ -335,10 +333,8 @@ export function detectSignal(ctx: SignalContext): TradingSignal | null {
   const dispStart = Math.max(0, candles5m.length - 11);
   const dispResult = scoreDisplacement(candles5m, dispStart, candles5m.length - 1);
 
-  // 13. Calculate confidence
-  // At this point bias.bias is guaranteed BULLISH or BEARISH (NO_TRADE returned early)
-  // True = assume both Daily and 4H agree (single-context approximation)
-  const biasFromBothTF = true;
+  // 13. Calculate confidence — use actual bothTFAgree from bias computation
+  const biasFromBothTF = bias.bothTFAgree;
 
   const confidence = calculateConfidence({
     biasFromDailyAndHour: biasFromBothTF,
