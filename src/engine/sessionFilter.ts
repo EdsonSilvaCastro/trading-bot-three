@@ -79,17 +79,15 @@ function isInSession(
   const start = toMinutes(session.startHour, session.startMinute);
   const end = toMinutes(session.endHour, session.endMinute);
 
-  if (end === 0) {
-    // Session ends at midnight (00:00 = 1440 minutes as end boundary)
-    return current >= start;
+  // Treat midnight (0) as 1440 so range comparisons work correctly
+  const effectiveEnd = end === 0 ? 1440 : end;
+
+  if (start >= effectiveEnd) {
+    // Session wraps past midnight (e.g. ASIAN 20:00 -> 00:00 treated as 20:00 -> 24:00)
+    return current >= start || current < effectiveEnd;
   }
 
-  if (start > end) {
-    // Session crosses midnight
-    return current >= start || current < end;
-  }
-
-  return current >= start && current < end;
+  return current >= start && current < effectiveEnd;
 }
 
 /**
