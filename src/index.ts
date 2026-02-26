@@ -1,12 +1,12 @@
 // ============================================================
 // ICT Price Action Futures Bot - Main Entry Point
-// Phase 2: Analyzers + Bias Engine + Signal Detector
+// Phase 3: Execution Layer (Paper Trading + Risk Management)
 // ============================================================
 
 import 'dotenv/config';
 import cron from 'node-cron';
 import rootLogger, { createModuleLogger } from './monitoring/logger.js';
-import { initTelegramBot, sendAlert, sendDailyBias, setBotState } from './monitoring/telegramBot.js';
+import { initTelegramBot, sendAlert, sendDailyBias, setBotState, isManualKillSwitchActive } from './monitoring/telegramBot.js';
 import { getSupabaseClient } from './database/supabase.js';
 import { collectAll, collectTimeframe } from './collector/candleCollector.js';
 import { detectAndStoreSwings } from './analyzer/swingDetector.js';
@@ -17,6 +17,9 @@ import { detectFVGs, updateFVGStates } from './analyzer/fvgDetector.js';
 import { analyzeStructure, detectSMS } from './analyzer/marketStructure.js';
 import { computeDailyBias, BiasContext } from './engine/biasEngine.js';
 import { detectSignal, TradingSignal, SignalContext } from './engine/signalDetector.js';
+import { PositionManager } from './execution/positionManager.js';
+import { resetDaily, resetWeekly, updateEquity, getRiskState, isKillSwitchActive } from './execution/riskManager.js';
+import { getOpenPositions, getTradeHistory, closeAllPaperPositions } from './execution/paperTrader.js';
 import type {
   Candle,
   FairValueGap,
@@ -31,91 +34,82 @@ const log = createModuleLogger('Main');
 
 // --------------- In-Memory State Caches ---------------
 
-/** Candles per timeframe (last 500 per TF) */
 const candleCache: Partial<Record<Timeframe, Candle[]>> = {};
-
-/** Swings per timeframe (last 200 per TF, populated after each swing detection cycle) */
 const swingCache: Partial<Record<Timeframe, Swing[]>> = {};
 
-/** Phase 2 state */
 let liquidityLevels: LiquidityLevel[] = [];
 let activeFVGs: FairValueGap[] = [];
 let recentSweeps: Sweep[] = [];
 let currentBias: DailyBias | null = null;
 
+// Phase 3 execution state
+const positionManager = new PositionManager(true); // Paper mode
+let accountBalance = parseFloat(process.env['PAPER_BALANCE'] ?? '10000');
+
 // --------------- Startup ---------------
 
 async function startup(): Promise<void> {
   log.info('==============================================');
-  log.info(' ICT Price Action Bot — Phase 2 Starting...');
+  log.info(' ICT Price Action Bot — Phase 3 Starting...');
   log.info('==============================================');
 
-  // 1. Check session status
   const sessionStatus = getSessionStatus();
   log.info(`Current session: ${sessionStatus}`);
-  log.info(`Kill zone active: ${isKillzoneActive()}`);
+  log.info(`Paper balance: $${accountBalance.toFixed(2)} USDT`);
 
-  // 2. Initialize Telegram (graceful if not configured)
   initTelegramBot();
 
-  // 3. Check Supabase connectivity
   const db = getSupabaseClient();
-  if (!db) {
-    log.warn('Supabase not configured — running in memory-only mode');
-  } else {
-    log.info('Supabase connected');
-  }
+  log.info(db ? 'Supabase connected' : 'Supabase not configured — memory-only mode');
 
-  // 4. Initial backfill: collect 200 candles per timeframe
-  log.info('Starting initial candle backfill (200 candles × 5 timeframes)...');
+  // Backfill candles
+  log.info('Starting initial candle backfill (200 × 5 timeframes)...');
   try {
     const allCandles = await collectAll(200);
     for (const [tf, candles] of Object.entries(allCandles)) {
       candleCache[tf as Timeframe] = candles;
-      log.info(`  ${tf}: ${candles.length} candles collected`);
+      log.info(`  ${tf}: ${candles.length} candles`);
     }
   } catch (err) {
     log.error(`Backfill failed: ${(err as Error).message}`);
   }
 
-  // 5. Run swing detection on backfilled candles (FIX 2: populate swing cache)
+  // Initial swing detection (populates swing cache)
   log.info('Running initial swing detection...');
-  const swingTimeframes: Timeframe[] = ['5m', '15m', '1h', '4h', '1d'];
-  for (const tf of swingTimeframes) {
+  const swingTFs: Timeframe[] = ['5m', '15m', '1h', '4h', '1d'];
+  for (const tf of swingTFs) {
     const candles = candleCache[tf] ?? [];
     if (candles.length >= 7) {
       try {
-        const newSwings = await detectAndStoreSwings(candles, []);
-        swingCache[tf] = newSwings.slice(-200); // FIX 2: store in cache
-        log.info(`  ${tf}: ${newSwings.length} swings detected`);
+        const swings = await detectAndStoreSwings(candles, []);
+        swingCache[tf] = swings.slice(-200);
+        log.info(`  ${tf}: ${swings.length} swings`);
       } catch (err) {
         log.warn(`  ${tf} swing detection failed: ${(err as Error).message}`);
         swingCache[tf] = [];
       }
     } else {
-      log.warn(`  ${tf}: Not enough candles for swing detection (${candles.length})`);
       swingCache[tf] = [];
     }
   }
 
-  // 6. Compute initial daily bias
+  // Initial bias
   try {
-    const biasCtx = buildBiasContext();
-    currentBias = computeDailyBias(biasCtx);
+    currentBias = computeDailyBias(buildBiasContext());
     log.info(`Initial bias: ${currentBias.bias} | AMD: ${currentBias.amdPhase} | Zone: ${currentBias.b3Zone}`);
   } catch (err) {
-    log.warn(`Initial bias computation failed: ${(err as Error).message}`);
+    log.warn(`Initial bias failed: ${(err as Error).message}`);
   }
 
-  // 7. Push initial state to Telegram bot
   updateBotState();
 
-  // 8. Startup complete alert
-  const botMode = process.env['PAPER_TRADING'] === 'true' ? 'PAPER' : 'LIVE';
   const symbol = process.env['SYMBOL'] ?? 'BTCUSDT';
-  const biasStr = currentBias ? ` | Bias: ${currentBias.bias}` : '';
   await sendAlert(
-    `🚀 <b>ICT Bot Started — Phase 2</b>\nMode: ${botMode}\nSymbol: ${symbol}\nSession: ${sessionStatus}${biasStr}`,
+    `🚀 <b>ICT Bot Started — Phase 3</b>\n` +
+    `Mode: PAPER | Symbol: ${symbol}\n` +
+    `Balance: $${accountBalance.toFixed(2)} USDT\n` +
+    `Session: ${sessionStatus}\n` +
+    `Bias: ${currentBias?.bias ?? 'Unknown'}`,
   );
 
   log.info('Startup complete — scheduling cron jobs');
@@ -125,39 +119,46 @@ async function startup(): Promise<void> {
 // --------------- Cron Jobs ---------------
 
 function scheduleCronJobs(): void {
-  // Every 5 minutes: collect 5M candles + run swing detection
+  // 5M: candle update + analysis + position management
   cron.schedule('*/5 * * * *', async () => {
     await runTimeframeUpdate('5m');
-    // Also run analysis cycle (handles killzone check internally)
+
+    const price = candleCache['5m']?.slice(-1)[0]?.close ?? 0;
+    if (price > 0) {
+      // Always manage positions (SL/TP can hit outside killzones)
+      const structure15m = analyzeStructure(candleCache['15m'] ?? [], swingCache['15m'] ?? []);
+      await positionManager.checkPositions(price, new Date(), structure15m);
+    }
+
+    // Full analysis only during killzones
     await runAnalysisCycle();
   });
 
-  // Every 15 minutes: collect 15M candles + swing detection
+  // 15M candles + swings
   cron.schedule('*/15 * * * *', async () => {
     await runTimeframeUpdate('15m');
   });
 
-  // Every hour at :00: collect 1H candles + swing detection
+  // 1H candles + swings
   cron.schedule('0 * * * *', async () => {
     await runTimeframeUpdate('1h');
   });
 
-  // Every 4 hours: collect 4H candles (no swing detection — low-frequency TF)
+  // 4H candles
   cron.schedule('0 */4 * * *', async () => {
     await runTimeframeUpdate('4h', false);
   });
 
-  // Daily at 00:05 UTC: collect daily candles
+  // Daily 00:05 UTC: daily candles
   cron.schedule('5 0 * * *', async () => {
     await runTimeframeUpdate('1d', false);
   });
 
-  // Daily at 00:10 UTC: compute fresh daily bias after daily close
+  // Daily 00:10 UTC: recalculate bias after daily close
   cron.schedule('10 0 * * *', async () => {
     try {
-      const biasCtx = buildBiasContext();
-      currentBias = computeDailyBias(biasCtx);
-      log.info(`Daily bias updated: ${currentBias.bias} | AMD: ${currentBias.amdPhase}`);
+      currentBias = computeDailyBias(buildBiasContext());
+      log.info(`Daily bias: ${currentBias.bias} | AMD: ${currentBias.amdPhase}`);
       updateBotState();
       await sendDailyBias(currentBias);
     } catch (err) {
@@ -165,44 +166,58 @@ function scheduleCronJobs(): void {
     }
   });
 
-  // Every 5 minutes: log session status
-  cron.schedule('*/5 * * * *', () => {
-    const status = getSessionStatus();
-    const kzActive = isKillzoneActive();
-    log.info(`[Session] ${status} | Killzone: ${kzActive ? 'ACTIVE' : 'inactive'}`);
+  // Daily 00:00 UTC: reset daily risk counters
+  cron.schedule('0 0 * * *', () => {
+    resetDaily();
+    log.info('Daily risk counters reset');
   });
 
-  log.info('Cron jobs scheduled:');
-  log.info('  - 5m candles + swings + analysis: every 5 minutes');
-  log.info('  - 15m candles + swings: every 15 minutes');
-  log.info('  - 1h candles + swings: every hour');
-  log.info('  - 4h candles: every 4 hours');
-  log.info('  - 1d candles: daily at 00:05 UTC');
-  log.info('  - Daily bias: daily at 00:10 UTC');
-  log.info('  - Session status: every 5 minutes');
+  // Monday 00:00 UTC: reset weekly risk counters
+  cron.schedule('0 0 * * 1', () => {
+    resetWeekly();
+    log.info('Weekly risk counters reset');
+  });
+
+  // Hourly: update equity tracking
+  cron.schedule('0 * * * *', () => {
+    try {
+      const openPnL = getOpenPositions().reduce((sum, pos) => {
+        if (!pos.entryFilled || !pos.trade.entryPrice) return sum;
+        const price = candleCache['5m']?.slice(-1)[0]?.close ?? 0;
+        if (!price) return sum;
+        const dir = pos.trade.direction === 'LONG' ? 1 : -1;
+        const pnl = dir * ((price - pos.trade.entryPrice) / pos.trade.entryPrice)
+          * pos.trade.sizeUsdt * pos.trade.leverage;
+        return sum + pnl;
+      }, 0);
+      updateEquity(accountBalance + openPnL);
+    } catch (err) {
+      log.error(`Equity update error: ${(err as Error).message}`);
+    }
+  });
+
+  // Every 5 minutes: log session status
+  cron.schedule('*/5 * * * *', () => {
+    log.info(`[Session] ${getSessionStatus()} | Killzone: ${isKillzoneActive() ? 'ACTIVE' : 'inactive'}`);
+  });
+
+  log.info('Cron jobs scheduled (Phase 3)');
 }
 
 // --------------- Timeframe Update ---------------
 
-/**
- * Fetch new candles for a timeframe, update cache, run swing detection (FIX 2: uses cache).
- */
 async function runTimeframeUpdate(tf: Timeframe, runSwings = true): Promise<void> {
   try {
     const newCandles = await collectTimeframe(tf, 10);
-
-    // Merge into cache (keep last 500 candles per TF)
     const existing = candleCache[tf] ?? [];
-    const merged = mergeCandles(existing, newCandles, 500);
-    candleCache[tf] = merged;
+    candleCache[tf] = mergeCandles(existing, newCandles, 500);
 
-    // FIX 2: use existing swing cache to detect only NEW swings
-    if (runSwings && merged.length >= 7) {
+    if (runSwings && (candleCache[tf]?.length ?? 0) >= 7) {
       const existingSwings = swingCache[tf] ?? [];
-      const newSwings = await detectAndStoreSwings(merged, existingSwings);
+      const newSwings = await detectAndStoreSwings(candleCache[tf]!, existingSwings);
       if (newSwings.length > 0) {
         swingCache[tf] = [...existingSwings, ...newSwings].slice(-200);
-        log.info(`[${tf}] ${newSwings.length} new swing(s) detected`);
+        log.info(`[${tf}] ${newSwings.length} new swing(s)`);
       }
     }
   } catch (err) {
@@ -212,27 +227,25 @@ async function runTimeframeUpdate(tf: Timeframe, runSwings = true): Promise<void
 
 // --------------- Analysis Cycle ---------------
 
-/**
- * Run the full Phase 2 analysis cycle.
- * Only performs full analysis during killzones to save CPU.
- * FVG state updates always run (price-independent).
- */
 async function runAnalysisCycle(): Promise<void> {
   try {
     const candles5m = candleCache['5m'] ?? [];
     const candles15m = candleCache['15m'] ?? [];
 
-    // Always update FVG states with latest candles
+    // Always update FVG states
     if (activeFVGs.length > 0 && candles5m.length > 0) {
       activeFVGs = updateFVGStates(activeFVGs, candles5m.slice(-5));
     }
 
-    // Only full analysis during killzones
+    // Full analysis only in killzones
     if (!isKillzoneActive()) return;
     if (candles5m.length < 20 || candles15m.length < 20) return;
 
-    const candles1h = candleCache['1h'] ?? [];
-    const candles4h = candleCache['4h'] ?? [];
+    // Skip if kill switch active
+    if (isKillSwitchActive() || isManualKillSwitchActive()) {
+      log.warn('Kill switch active — skipping signal detection');
+      return;
+    }
 
     // 1. Update liquidity map
     liquidityLevels = mapLiquidityLevels(
@@ -240,44 +253,41 @@ async function runAnalysisCycle(): Promise<void> {
       swingCache as Record<Timeframe, Swing[]>,
       buildSessionHighLows(),
     );
-
-    // 2. Update liquidity states (mark swept levels)
     liquidityLevels = updateLiquidityStates(liquidityLevels, candles5m.slice(-10));
 
-    // 3. Scan for new sweeps
-    const activeLevels = liquidityLevels.filter((l) => l.state === 'ACTIVE');
-    const newSweeps = scanForSweeps(activeLevels, candles5m.slice(-20));
+    // 2. Scan for sweeps
+    const newSweeps = scanForSweeps(
+      liquidityLevels.filter((l) => l.state === 'ACTIVE'),
+      candles5m.slice(-20),
+    );
     if (newSweeps.length > 0) {
       recentSweeps = [...recentSweeps.slice(-10), ...newSweeps];
     }
 
-    // 4. Detect FVGs on 5M and 15M, merge and deduplicate
+    // 3. Detect FVGs
     const newFVGs5m = detectFVGs(candles5m, '5m');
     const newFVGs15m = detectFVGs(candles15m, '15m');
     activeFVGs = mergeFVGs(activeFVGs, [...newFVGs5m, ...newFVGs15m]);
 
-    // 5. Build structure states
+    // 4. Structure states
     const structure15m = analyzeStructure(candles15m, swingCache['15m'] ?? []);
     const structure5m = analyzeStructure(candles5m, swingCache['5m'] ?? []);
 
-    // 6. Check for SMS events (the entry trigger)
+    // 5. SMS detection
     const sms15m = detectSMS('15m', candles15m, swingCache['15m'] ?? []);
     const sms5m = detectSMS('5m', candles5m, swingCache['5m'] ?? []);
-
     if (sms15m !== 'NONE' || sms5m !== 'NONE') {
-      log.info(`SMS detected! 15M: ${sms15m} | 5M: ${sms5m}`);
-      // Attach last events to structure states for signal detector
+      log.info(`SMS! 15M: ${sms15m} | 5M: ${sms5m}`);
       structure15m.lastEvent = sms15m;
       structure5m.lastEvent = sms5m;
     }
 
-    // 7. If no directional bias, skip signal detection
     if (!currentBias || currentBias.bias === 'NO_TRADE') return;
 
     const currentPrice = candles5m.slice(-1)[0]?.close ?? 0;
-    if (currentPrice === 0) return;
+    if (!currentPrice) return;
 
-    // 8. Try to detect a signal
+    // 6. Signal detection
     const signalCtx: SignalContext = {
       bias: currentBias,
       recentSweeps,
@@ -293,116 +303,95 @@ async function runAnalysisCycle(): Promise<void> {
     };
 
     const signal = detectSignal(signalCtx);
-
     if (signal) {
       await handleSignal(signal);
     }
 
-    // Update bot state with latest info
     updateBotState();
-
   } catch (err) {
     log.error(`Analysis cycle error: ${(err as Error).message}`);
   }
 }
 
-/**
- * Handle a confirmed trading signal: log + alert.
- * Phase 3 will add order execution here.
- */
-async function handleSignal(signal: TradingSignal): Promise<void> {
-  const entryPrice = signal.entryFVG.ce;
+// --------------- Signal Handler ---------------
 
+async function handleSignal(signal: TradingSignal): Promise<void> {
+  const entry = signal.entryFVG.ce;
   log.info(
-    `SIGNAL: ${signal.direction} | Entry: ${entryPrice.toFixed(2)} | SL: ${signal.stopLoss.toFixed(2)} | TP1: ${signal.tp1.toFixed(2)} | R:R: ${signal.rrRatio.toFixed(1)}x | Conf: ${signal.confidence}`,
+    `SIGNAL: ${signal.direction} | Entry ~${entry.toFixed(2)} | SL: ${signal.stopLoss.toFixed(2)} | TP1: ${signal.tp1.toFixed(2)} | R:R: ${signal.rrRatio.toFixed(1)}x | Conf: ${signal.confidence}`,
   );
 
+  // Alert before executing (so user sees it even if execution fails)
   await sendAlert(
     `🎯 <b>ICT Signal: ${signal.direction}</b>\n` +
-    `Entry Zone: ${signal.entryFVG.bottom.toFixed(2)} - ${signal.entryFVG.top.toFixed(2)}\n` +
-    `Stop Loss: ${signal.stopLoss.toFixed(2)}\n` +
-    `TP1 (IRL): ${signal.tp1.toFixed(2)}\n` +
-    `TP2 (ERL): ${signal.tp2.toFixed(2)}\n` +
-    `R:R: ${signal.rrRatio.toFixed(1)}x\n` +
-    `Confidence: ${signal.confidence}/100\n` +
-    `Displacement: ${signal.displacementScore}/10\n` +
-    `FVG Quality: ${signal.entryFVG.quality}`
+    `Entry Zone: ${signal.entryFVG.bottom.toFixed(2)} – ${signal.entryFVG.top.toFixed(2)}\n` +
+    `SL: ${signal.stopLoss.toFixed(2)} | TP1: ${signal.tp1.toFixed(2)} | TP2: ${signal.tp2.toFixed(2)}\n` +
+    `R:R: ${signal.rrRatio.toFixed(1)}x | Confidence: ${signal.confidence}/100\n` +
+    `Displacement: ${signal.displacementScore}/10 | FVG: ${signal.entryFVG.quality}`,
   );
 
-  // Phase 3: add execution here
+  // Execute via position manager
+  await positionManager.executeSignal(signal, accountBalance);
+  updateBotState();
 }
 
 // --------------- Context Builders ---------------
 
-/** Build BiasContext from current caches. */
 function buildBiasContext(): BiasContext {
-  const currentPrice = candleCache['5m']?.slice(-1)[0]?.close ?? 0;
   return {
     dailyCandles: candleCache['1d'] ?? [],
     fourHourCandles: candleCache['4h'] ?? [],
     dailySwings: swingCache['1d'] ?? [],
     fourHourSwings: swingCache['4h'] ?? [],
     liquidityLevels,
-    currentPrice,
+    currentPrice: candleCache['5m']?.slice(-1)[0]?.close ?? 0,
     currentSession: getCurrentSession(),
   };
 }
 
-/** Build session high/low data for liquidity mapper. */
 function buildSessionHighLows() {
   const now = new Date();
   const candles1h = candleCache['1h'] ?? [];
-
-  const asian = getSessionHighLow('ASIAN', now, candles1h) ?? undefined;
-  const london = getSessionHighLow('LONDON', now, candles1h) ?? undefined;
-
-  return { asian, london };
+  return {
+    asian: getSessionHighLow('ASIAN', now, candles1h) ?? undefined,
+    london: getSessionHighLow('LONDON', now, candles1h) ?? undefined,
+  };
 }
 
-/** Push current bot state to Telegram (for /status, /bias, /levels commands). */
 function updateBotState(): void {
   setBotState({
     bias: currentBias,
     activeFVGsCount: activeFVGs.filter((f) => f.state === 'OPEN' || f.state === 'PARTIALLY_FILLED').length,
     liquidityLevels,
     swingCache,
+    openPositions: getOpenPositions(),
+    tradeHistory: getTradeHistory(),
+    riskState: getRiskState(),
+    accountBalance,
   });
 }
 
-// --------------- FVG Merge Utility ---------------
+// --------------- Merge Utilities ---------------
 
-/**
- * Merge new FVGs into the existing pool, deduplicating by id.
- * Expires FVGs older than 24 hours or fully filled/violated.
- */
 function mergeFVGs(existing: FairValueGap[], incoming: FairValueGap[]): FairValueGap[] {
   const map = new Map<string, FairValueGap>();
   for (const fvg of existing) map.set(fvg.id, fvg);
   for (const fvg of incoming) {
     if (!map.has(fvg.id)) map.set(fvg.id, fvg);
   }
-
-  const cutoff = Date.now() - 24 * 60 * 60 * 1000; // 24h
+  const cutoff = Date.now() - 24 * 60 * 60 * 1000;
   return Array.from(map.values()).filter(
     (f) => f.state !== 'FILLED' && f.state !== 'VIOLATED' && f.timestamp.getTime() > cutoff,
   );
 }
 
-// --------------- Candle Merge Utility ---------------
-
-/**
- * Merge new candles into existing array, deduplicating by timestamp.
- * Keeps only the most recent maxSize candles.
- */
 function mergeCandles(existing: Candle[], incoming: Candle[], maxSize: number): Candle[] {
   const map = new Map<number, Candle>();
   for (const c of existing) map.set(c.timestamp.getTime(), c);
-  for (const c of incoming) map.set(c.timestamp.getTime(), c); // incoming overwrites
-
-  const sorted = Array.from(map.values()).sort(
-    (a, b) => a.timestamp.getTime() - b.timestamp.getTime(),
-  );
-  return sorted.slice(-maxSize);
+  for (const c of incoming) map.set(c.timestamp.getTime(), c);
+  return Array.from(map.values())
+    .sort((a, b) => a.timestamp.getTime() - b.timestamp.getTime())
+    .slice(-maxSize);
 }
 
 // --------------- Graceful Shutdown ---------------
@@ -410,6 +399,14 @@ function mergeCandles(existing: Candle[], incoming: Candle[], maxSize: number): 
 function setupShutdownHandlers(): void {
   const shutdown = async (signal: string) => {
     log.info(`Received ${signal} — shutting down gracefully...`);
+    // Close all open paper positions at current price
+    const price = candleCache['5m']?.slice(-1)[0]?.close ?? 0;
+    if (price > 0) {
+      const closed = closeAllPaperPositions(price);
+      if (closed.length > 0) {
+        log.info(`Force-closed ${closed.length} paper position(s) at shutdown`);
+      }
+    }
     await sendAlert(`⛔ ICT Bot stopping (${signal})`).catch(() => {});
     process.exit(0);
   };
