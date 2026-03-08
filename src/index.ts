@@ -63,14 +63,42 @@ async function startup(): Promise<void> {
   log.info(' ICT Price Action Bot — Phase 3 Starting...');
   log.info('==============================================');
 
+  // ── FIX 3: Live trading safety guard ──────────────────────────────────────
+  if (process.env['PAPER_TRADING'] !== 'true' && process.env['BYBIT_TESTNET'] !== 'true') {
+    if (process.env['LIVE_TRADING_CONFIRMED'] !== 'true') {
+      log.error('🛑 BLOCKED: Live trading on mainnet requires LIVE_TRADING_CONFIRMED=true in .env');
+      process.exit(1);
+    }
+  }
+  log.info(
+    `🔧 Mode: ${process.env['PAPER_TRADING'] === 'true' ? 'PAPER TRADING' : '⚡ LIVE TRADING'} | API: ${process.env['BYBIT_TESTNET'] === 'true' ? 'Testnet' : 'Mainnet'}`,
+  );
+  // ──────────────────────────────────────────────────────────────────────────
+
   const sessionStatus = getSessionStatus();
   log.info(`Current session: ${sessionStatus}`);
   log.info(`Paper balance: $${accountBalance.toFixed(2)} USDT`);
 
   initTelegramBot();
 
+  // ── FIX 2: Supabase startup validation ────────────────────────────────────
   const db = getSupabaseClient();
-  log.info(db ? 'Supabase connected' : 'Supabase not configured — memory-only mode');
+  if (!db) {
+    log.warn('Supabase not configured — running in memory-only mode');
+  } else {
+    try {
+      const { error } = await db.from('candles').select('count', { count: 'exact', head: true });
+      if (error) throw error;
+      log.info('✅ Supabase connected — candles table accessible');
+    } catch (err) {
+      const msg = (err as Error).message;
+      log.error(`🛑 CRITICAL: Supabase connection failed: ${msg}`);
+      log.error('   Check SUPABASE_URL and SUPABASE_ANON_KEY in .env');
+      await sendAlert(`🛑 Supabase connection failed: ${msg}\nBot running in memory-only mode.`).catch(() => {});
+      // Do NOT crash — continue in memory-only mode
+    }
+  }
+  // ──────────────────────────────────────────────────────────────────────────
 
   // Backfill candles
   log.info('Starting initial candle backfill (200 × 5 timeframes)...');
@@ -251,6 +279,8 @@ async function runAnalysisCycle(): Promise<void> {
     if (!isKillzoneActive()) return;
     if (candles5m.length < 20 || candles15m.length < 20) return;
 
+    log.info('[Main] Killzone active — checking bias for signal generation...');
+
     // Skip if kill switch active
     if (isKillSwitchActive() || isManualKillSwitchActive()) {
       log.warn('Kill switch active — skipping signal detection');
@@ -296,7 +326,11 @@ async function runAnalysisCycle(): Promise<void> {
       structure5m.lastEvent = sms5m;
     }
 
-    if (!currentBias || currentBias.bias === 'NO_TRADE') return;
+    if (!currentBias || currentBias.bias === 'NO_TRADE') {
+      log.info(`[Main] Bias result: ${currentBias?.bias ?? 'NONE'} (${currentBias?.biasConfidence ?? 'NONE'}) — SKIPPING signal detection`);
+      return;
+    }
+    log.info(`[Main] Bias result: ${currentBias.bias} (${currentBias.biasConfidence}) riskMult=${currentBias.riskMultiplier} — proceeding to signal detection`);
 
     const currentPrice = candles5m.slice(-1)[0]?.close ?? 0;
     if (!currentPrice) return;
@@ -344,8 +378,15 @@ async function handleSignal(signal: TradingSignal): Promise<void> {
     `Displacement: ${signal.displacementScore}/10 | FVG: ${signal.entryFVG.quality}`,
   );
 
+  // Apply bias riskMultiplier to effective position size (Fix 1 downstream)
+  const riskMult = currentBias?.riskMultiplier ?? 1;
+  const effectiveBalance = accountBalance * riskMult;
+  if (riskMult < 1) {
+    log.info(`Position size reduced to ${(riskMult * 100).toFixed(0)}% (bias confidence=REDUCED): effective balance $${effectiveBalance.toFixed(2)}`);
+  }
+
   // Execute via position manager
-  await positionManager.executeSignal(signal, accountBalance);
+  await positionManager.executeSignal(signal, effectiveBalance);
   updateBotState();
 }
 

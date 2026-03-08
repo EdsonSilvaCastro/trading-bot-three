@@ -137,6 +137,13 @@ export type FrameworkState =
 export type AMDPhase = 'ACCUMULATION' | 'MANIPULATION' | 'DISTRIBUTION';
 export type PremiumDiscountZone = 'PREMIUM' | 'DISCOUNT';
 
+/**
+ * FULL   — both Daily and 4H agree on direction → full position size
+ * REDUCED — Daily is clear but 4H is TRANSITION → half position size
+ * NONE   — conflicting or no clear HTF direction → no trade
+ */
+export type BiasConfidence = 'FULL' | 'REDUCED' | 'NONE';
+
 export interface DailyBias {
   date: Date;
   b1Framework: FrameworkState;
@@ -146,7 +153,11 @@ export interface DailyBias {
   b3Depth: number; // 0-1, how deep in the zone
   bias: BiasDirection;
   amdPhase: AMDPhase;
-  /** True when both Daily AND 4H structure agree on direction (+20 confidence vs +10) */
+  /** Confidence tier: FULL / REDUCED / NONE */
+  biasConfidence: BiasConfidence;
+  /** Position-size multiplier derived from confidence: 1.0 (FULL) | 0.5 (REDUCED) | 0 (NONE) */
+  riskMultiplier: number;
+  /** True when both Daily AND 4H structure agree on direction (biasConfidence === 'FULL') */
   bothTFAgree: boolean;
 }
 

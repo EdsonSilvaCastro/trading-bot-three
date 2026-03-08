@@ -210,7 +210,7 @@ export function detectSignal(ctx: SignalContext): TradingSignal | null {
 
   // 1. Bias must be directional
   if (bias.bias === 'NO_TRADE') {
-    log.debug('detectSignal: NO_TRADE bias — skipping');
+    log.info('[Step 0] Bias=NO_TRADE — pipeline blocked');
     return null;
   }
 
@@ -222,6 +222,8 @@ export function detectSignal(ctx: SignalContext): TradingSignal | null {
 
   const direction: 'LONG' | 'SHORT' = bias.bias === 'BULLISH' ? 'LONG' : 'SHORT';
   const fvgType = direction === 'LONG' ? 'BULLISH' : 'BEARISH';
+  const confidenceTag = bias.biasConfidence ?? (bias.bothTFAgree ? 'FULL' : 'REDUCED');
+  log.info(`[Step 0] Bias=${bias.bias} (${confidenceTag}) riskMult=${bias.riskMultiplier ?? 1} | direction=${direction}`);
 
   // 3. Find qualifying sweep (score >= minScoreForTrigger)
   const qualifyingSweep = recentSweeps
@@ -229,9 +231,10 @@ export function detectSignal(ctx: SignalContext): TradingSignal | null {
     .sort((a, b) => b.timestamp.getTime() - a.timestamp.getTime())[0];
 
   if (!qualifyingSweep) {
-    log.debug('detectSignal: no qualifying sweep');
+    log.info(`[Step 1] Sweep: FAIL — no qualifying sweep (total recent sweeps: ${recentSweeps.length})`);
     return null;
   }
+  log.info(`[Step 1] Sweep: OK — score=${qualifyingSweep.score} type=${qualifyingSweep.liquidityLevel.type} @ ${qualifyingSweep.liquidityLevel.level.toFixed(2)}`);
 
   // 4. Require confirmed SMS on 15M or 5M.
   // CHOCH alone does NOT qualify — it lacks the displacement confirmation that proves
@@ -245,9 +248,11 @@ export function detectSignal(ctx: SignalContext): TradingSignal | null {
     structureState5m.lastEvent === 'SMS_BEARISH';
 
   if (!has15mSMS && !has5mSMS) {
-    log.debug('detectSignal: no confirmed SMS on 5M or 15M (CHOCH without displacement rejected)');
+    log.info(`[Step 2] MSS: FAIL — no SMS on 5M or 15M (15M last=${structureState15m.lastEvent} 5M last=${structureState5m.lastEvent})`);
     return null;
   }
+  const mssDetail = has15mSMS ? `15M:${structureState15m.lastEvent}` : `5M:${structureState5m.lastEvent}`;
+  log.info(`[Step 2] MSS: OK — ${mssDetail}`);
 
   // 5. Find entry FVG
   const activeOpenFVGs = fvgs.filter(
@@ -256,9 +261,10 @@ export function detectSignal(ctx: SignalContext): TradingSignal | null {
   const entryFVG = findEntryFVG(activeOpenFVGs, fvgType);
 
   if (!entryFVG) {
-    log.debug(`detectSignal: no entry FVG found for ${fvgType}`);
+    log.info(`[Step 3] FVG: FAIL — no entry FVG found for ${fvgType} (total active FVGs: ${activeOpenFVGs.length})`);
     return null;
   }
+  log.info(`[Step 3] FVG: OK — ${fvgType} quality=${entryFVG.quality} @ CE=${entryFVG.ce.toFixed(2)} (${entryFVG.bottom.toFixed(2)}–${entryFVG.top.toFixed(2)})`);
 
   // 6. Check zone alignment (price should be in DISCOUNT for longs, PREMIUM for shorts)
   const swingHighs = [...swings15m, ...swings5m]
@@ -283,16 +289,18 @@ export function detectSignal(ctx: SignalContext): TradingSignal | null {
   }
 
   if (!inCorrectZone) {
-    log.debug(`detectSignal: price ${currentPrice.toFixed(2)} not in correct zone for ${direction}`);
+    log.info(`[Step 4] Zone: FAIL — price ${currentPrice.toFixed(2)} not in correct zone for ${direction} (need ${direction === 'LONG' ? 'DISCOUNT' : 'PREMIUM'})`);
     return null;
   }
+  log.info(`[Step 4] Zone: OK — ${direction === 'LONG' ? 'DISCOUNT' : 'PREMIUM'} | OTE=${inOTE}`);
 
   // 7. Check for blocking liquidity
   const entryPrice = direction === 'LONG' ? entryFVG.ce : entryFVG.ce;
   if (hasBlockingLiquidity(liquidityLevels, direction, entryPrice)) {
-    log.debug('detectSignal: blocking liquidity found — skipping');
+    log.info('[Step 5] Liquidity: FAIL — blocking liquidity found near entry');
     return null;
   }
+  log.info('[Step 5] Liquidity: OK — path clear');
 
   // 8. Calculate stop loss
   // SL = beyond the swing that caused the SMS + buffer
@@ -333,8 +341,8 @@ export function detectSignal(ctx: SignalContext): TradingSignal | null {
   const dispStart = Math.max(0, candles5m.length - 11);
   const dispResult = scoreDisplacement(candles5m, dispStart, candles5m.length - 1);
 
-  // 13. Calculate confidence — use actual bothTFAgree from bias computation
-  const biasFromBothTF = bias.bothTFAgree;
+  // 13. Calculate confidence — use biasConfidence tier (FULL=+20, REDUCED/NONE=+10)
+  const biasFromBothTF = bias.biasConfidence === 'FULL';
 
   const confidence = calculateConfidence({
     biasFromDailyAndHour: biasFromBothTF,
@@ -347,9 +355,10 @@ export function detectSignal(ctx: SignalContext): TradingSignal | null {
   });
 
   if (confidence < MIN_CONFIDENCE) {
-    log.debug(`detectSignal: confidence too low (${confidence} < ${MIN_CONFIDENCE})`);
+    log.info(`[Step 6] Confidence: FAIL — ${confidence} < ${MIN_CONFIDENCE} (rr=${rrRatio.toFixed(1)} disp=${dispResult.score})`);
     return null;
   }
+  log.info(`[Step 6] Confidence: OK — ${confidence}/100 | R:R=${rrRatio.toFixed(1)} | SL=${stopLoss.toFixed(2)} | TP1=${tp1.toFixed(2)}`);
 
   const signal: TradingSignal = {
     direction,

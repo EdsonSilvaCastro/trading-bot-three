@@ -53,6 +53,8 @@ export function detectFVGs(candles: Candle[], timeframe: Timeframe): FairValueGa
   const fvgs: FairValueGap[] = [];
   if (candles.length < 3) return fvgs;
 
+  log.info(`[FVGDetector] Scanning for FVGs on ${timeframe} (${candles.length} candles)...`);
+
   for (let i = 1; i <= candles.length - 2; i++) {
     const prev = candles[i - 1]!;
     const curr = candles[i]!;
@@ -103,6 +105,11 @@ export function detectFVGs(candles: Candle[], timeframe: Timeframe): FairValueGa
   }
 
   log.debug(`detectFVGs [${timeframe}]: found ${fvgs.length} FVGs in ${candles.length} candles`);
+  if (fvgs.length > 0) {
+    log.info(`[FVGDetector] Found ${fvgs.length} FVG(s) on ${timeframe}: ${fvgs.map((f) => `${f.type}@${f.ce.toFixed(2)}[${f.quality}]`).join(', ')}`);
+  } else {
+    log.info(`[FVGDetector] No qualifying FVGs found on ${timeframe}`);
+  }
   return fvgs;
 }
 

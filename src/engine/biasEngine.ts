@@ -14,6 +14,7 @@
 import {
   DailyBias,
   BiasDirection,
+  BiasConfidence,
   FrameworkState,
   AMDPhase,
   PremiumDiscountZone,
@@ -213,25 +214,71 @@ export function computeDailyBias(ctx: BiasContext): DailyBias {
   const structure4h = analyzeStructure(fourHourCandles, fourHourSwings);
   const structureDaily = analyzeStructure(dailyCandles, dailySwings);
 
-  // Determine bias direction
+  // Determine bias direction and confidence using 3-tier system:
+  //
+  //   TIER 1 — FULL (both TFs agree):
+  //     Daily=BULLISH + 4H=BULLISH → BULLISH, riskMultiplier=1.0
+  //     Daily=BEARISH + 4H=BEARISH → BEARISH, riskMultiplier=1.0
+  //
+  //   TIER 2 — REDUCED (Daily clear, 4H transitioning or Daily undefined):
+  //     Daily=BULLISH/BEARISH + 4H=TRANSITION → follow Daily, riskMultiplier=0.5
+  //     Daily=UNDEFINED + 4H=BULLISH/BEARISH   → follow 4H,    riskMultiplier=0.5
+  //
+  //   TIER 3 — NONE (conflicting or no clear HTF direction):
+  //     Daily=TRANSITION + anything → NO_TRADE
+  //     Daily=BULLISH + 4H=BEARISH → NO_TRADE
+  //     Daily=BEARISH + 4H=BULLISH → NO_TRADE
+  //     Daily=UNDEFINED + 4H=TRANSITION → NO_TRADE
+  //     4H=UNDEFINED → NO_TRADE
+
   let bias: BiasDirection = 'NO_TRADE';
+  let biasConfidence: BiasConfidence = 'NONE';
+  let riskMultiplier = 0;
+
   const trend4h = structure4h.trend;
   const trendDaily = structureDaily.trend;
 
-  if (trend4h === 'BULLISH') {
-    if (trendDaily === 'BULLISH' || trendDaily === 'UNDEFINED') bias = 'BULLISH';
-    else bias = 'NO_TRADE'; // Daily disagrees
-  } else if (trend4h === 'BEARISH') {
-    if (trendDaily === 'BEARISH' || trendDaily === 'UNDEFINED') bias = 'BEARISH';
-    else bias = 'NO_TRADE';
+  if (trendDaily === 'TRANSITION') {
+    // No clear daily direction — no trade regardless of 4H
+    bias = 'NO_TRADE';
+    biasConfidence = 'NONE';
+  } else if (trendDaily === 'BULLISH') {
+    if (trend4h === 'BULLISH') {
+      bias = 'BULLISH'; biasConfidence = 'FULL'; riskMultiplier = 1.0;
+    } else if (trend4h === 'TRANSITION') {
+      bias = 'BULLISH'; biasConfidence = 'REDUCED'; riskMultiplier = 0.5;
+    } else if (trend4h === 'BEARISH') {
+      bias = 'NO_TRADE'; biasConfidence = 'NONE'; // Conflict
+    }
+    // 4H=UNDEFINED → NO_TRADE (default)
+  } else if (trendDaily === 'BEARISH') {
+    if (trend4h === 'BEARISH') {
+      bias = 'BEARISH'; biasConfidence = 'FULL'; riskMultiplier = 1.0;
+    } else if (trend4h === 'TRANSITION') {
+      bias = 'BEARISH'; biasConfidence = 'REDUCED'; riskMultiplier = 0.5;
+    } else if (trend4h === 'BULLISH') {
+      bias = 'NO_TRADE'; biasConfidence = 'NONE'; // Conflict
+    }
+    // 4H=UNDEFINED → NO_TRADE (default)
+  } else {
+    // trendDaily === 'UNDEFINED' — no strong daily direction, follow 4H with reduced confidence
+    if (trend4h === 'BULLISH') {
+      bias = 'BULLISH'; biasConfidence = 'REDUCED'; riskMultiplier = 0.5;
+    } else if (trend4h === 'BEARISH') {
+      bias = 'BEARISH'; biasConfidence = 'REDUCED'; riskMultiplier = 0.5;
+    }
+    // 4H=TRANSITION or UNDEFINED → NO_TRADE (default)
   }
-  // TRANSITION or UNDEFINED 4H → NO_TRADE
-  if (trend4h === 'TRANSITION' || trend4h === 'UNDEFINED') bias = 'NO_TRADE';
 
   // Override if in no-trade session
   if (currentSession && (NO_TRADE_SESSIONS as string[]).includes(currentSession.name)) {
     bias = 'NO_TRADE';
+    biasConfidence = 'NONE';
+    riskMultiplier = 0;
   }
+
+  // bothTFAgree for backward-compat (true only for FULL confidence)
+  const bothTFAgree = biasConfidence === 'FULL';
 
   // B1: Framework state
   const b1Framework = determineFramework(fourHourSwings, fourHourCandles);
@@ -245,14 +292,16 @@ export function computeDailyBias(ctx: BiasContext): DailyBias {
   // AMD Phase
   const amdPhase = determineAMDPhase(fourHourCandles, currentPrice, currentSession, bias);
 
-  // Both TFs agree when Daily is not UNDEFINED and explicitly matches 4H direction
-  const bothTFAgree =
-    (trend4h === 'BULLISH' && trendDaily === 'BULLISH') ||
-    (trend4h === 'BEARISH' && trendDaily === 'BEARISH');
-
-  log.info(
-    `Bias: ${bias} | 4H=${trend4h} Daily=${trendDaily} bothTFAgree=${bothTFAgree} | B1=${b1Framework} | AMD=${amdPhase} | Zone=${b3Zone}`,
-  );
+  // Log with new format
+  if (bias === 'NO_TRADE') {
+    log.info(
+      `Bias: NO_TRADE | 4H=${trend4h} Daily=${trendDaily} confidence=NONE | B1=${b1Framework} | AMD=${amdPhase} | Zone=${b3Zone}`,
+    );
+  } else {
+    log.info(
+      `Bias: ${bias} (${biasConfidence}) | 4H=${trend4h} Daily=${trendDaily} confidence=${biasConfidence} riskMult=${riskMultiplier} | B1=${b1Framework} | AMD=${amdPhase} | Zone=${b3Zone}`,
+    );
+  }
 
   return {
     date: new Date(),
@@ -263,6 +312,8 @@ export function computeDailyBias(ctx: BiasContext): DailyBias {
     b3Depth,
     bias,
     amdPhase,
+    biasConfidence,
+    riskMultiplier,
     bothTFAgree,
   };
 }
