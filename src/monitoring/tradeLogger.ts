@@ -18,6 +18,7 @@ const CSV_HEADER = [
   'id', 'timestamp', 'direction', 'entryPrice', 'exitPrice', 'sizeUsdt', 'leverage',
   'stopLoss', 'tp1', 'tp2', 'tp1Hit', 'pnlUsdt', 'pnlPct', 'rrAchieved',
   'status', 'displacementScore', 'confidence', 'sweepId', 'fvgId', 'isPaper',
+  'mae', 'mfe', 'killzone', 'dayOfWeek',
 ].join(',');
 
 // --------------- Main Function ---------------
@@ -69,6 +70,10 @@ async function logToCSV(trade: Trade): Promise<void> {
       trade.sweepId ?? '',
       trade.fvgId ?? '',
       trade.isPaper ? '1' : '0',
+      trade.mae?.toFixed(4) ?? '',
+      trade.mfe?.toFixed(4) ?? '',
+      trade.killzone ?? '',
+      trade.dayOfWeek ?? '',
     ].join(',');
 
     fs.appendFileSync(CSV_PATH, row + '\n', 'utf8');
@@ -109,6 +114,10 @@ async function logToSupabase(trade: Trade): Promise<void> {
       sweep_id: trade.sweepId ?? null,
       fvg_id: trade.fvgId ?? null,
       is_paper: trade.isPaper,
+      mae: trade.mae ?? null,
+      mfe: trade.mfe ?? null,
+      killzone: trade.killzone ?? null,
+      day_of_week: trade.dayOfWeek ?? null,
     }, { onConflict: 'id' });
 
     if (error) throw error;

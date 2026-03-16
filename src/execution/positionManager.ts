@@ -8,6 +8,7 @@
 import { Trade, StructureState, TradeStatus } from '../types/index.js';
 import { checkRiskAllowance, recordTradeResult, isKillSwitchActive } from './riskManager.js';
 import { openPaperTrade, updatePaperPositions, forceClosePaperPosition, getOpenPositions } from './paperTrader.js';
+import { getCurrentSession } from '../engine/sessionFilter.js';
 import { evaluateExit } from '../engine/exitStrategy.js';
 import { logTrade } from '../monitoring/tradeLogger.js';
 import { sendAlert } from '../monitoring/telegramBot.js';
@@ -66,7 +67,12 @@ export class PositionManager {
     }
 
     // 2. Open paper trade (Phase 4: replace with real order placement here)
-    const trade = openPaperTrade(signal, riskCheck.positionSizeUsdt, riskCheck.leverage);
+    const now = new Date();
+    const activeSession = getCurrentSession(now);
+    const killzone = activeSession?.name ?? 'OFF_SESSION';
+    const days = ['SUN', 'MON', 'TUE', 'WED', 'THU', 'FRI', 'SAT'];
+    const dayOfWeek = days[now.getUTCDay()];
+    const trade = openPaperTrade(signal, riskCheck.positionSizeUsdt, riskCheck.leverage, killzone, dayOfWeek);
 
     log.info(
       `Paper trade opened: ${trade.direction} | size=${riskCheck.positionSizeUsdt.toFixed(2)} USDT | lev=${riskCheck.leverage}x`,

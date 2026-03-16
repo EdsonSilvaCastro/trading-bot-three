@@ -209,6 +209,14 @@ export interface Trade {
   dailyBiasId?: string;
   status: TradeStatus;
   isPaper: boolean;
+
+  // ← NUEVOS: métricas de ejecución
+  mae?: number;         // Maximum Adverse Excursion (% desde entry, negativo)
+  mfe?: number;         // Maximum Favorable Excursion (% desde entry, positivo)
+
+  // ← NUEVOS: contexto temporal
+  killzone?: string;    // Sesión ICT activa al abrir: 'LONDON' | 'NY_MORNING' | etc.
+  dayOfWeek?: string;   // 'MON' | 'TUE' | 'WED' | 'THU' | 'FRI' | 'SAT' | 'SUN'
 }
 
 // --------------- Bybit API Response Types ---------------

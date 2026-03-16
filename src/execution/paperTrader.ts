@@ -47,6 +47,10 @@ export interface PaperPosition {
   fvgCE: number;
   openTimestamp: Date;
   lastCheckPrice: number;
+  /** Worst adverse move since fill, as % of entry price (always <= 0) */
+  mae: number;
+  /** Best favorable move since fill, as % of entry price (always >= 0) */
+  mfe: number;
 }
 
 // --------------- Module-Level State ---------------
@@ -106,6 +110,8 @@ function closePaperPosition(
     pnlPct: totalPnlPct,
     rrAchieved: calcRR({ ...pos.trade, exitPrice }),
     status,
+    mae: pos.mae,
+    mfe: pos.mfe,
   };
 
   tradeHistory.push(closedTrade);
@@ -139,6 +145,8 @@ export function openPaperTrade(
   },
   sizeUsdt: number,
   leverage: number,
+  killzone?: string,
+  dayOfWeek?: string,
 ): Trade {
   // For LONG: fill price = FVG CE + slippage; SHORT: CE - slippage
   const fillPrice =
@@ -162,6 +170,8 @@ export function openPaperTrade(
     displacementScore: signal.displacementScore,
     sweepId: signal.sweep.id,
     fvgId: signal.entryFVG.id,
+    killzone,
+    dayOfWeek,
   };
 
   const pos: PaperPosition = {
@@ -177,11 +187,13 @@ export function openPaperTrade(
     fvgCE: signal.entryFVG.ce,
     openTimestamp: new Date(),
     lastCheckPrice: fillPrice,
+    mae: 0,
+    mfe: 0,
   };
 
   openPositions.push(pos);
   log.info(
-    `Paper trade PENDING: ${trade.direction} | FVG ${signal.entryFVG.bottom.toFixed(2)}-${signal.entryFVG.top.toFixed(2)} | SL=${signal.stopLoss.toFixed(2)} TP1=${signal.tp1.toFixed(2)} | size=${sizeUsdt.toFixed(2)} USDT`,
+    `Paper trade PENDING: ${trade.direction} | FVG ${signal.entryFVG.bottom.toFixed(2)}-${signal.entryFVG.top.toFixed(2)} | SL=${signal.stopLoss.toFixed(2)} TP1=${signal.tp1.toFixed(2)} | size=${sizeUsdt.toFixed(2)} USDT | killzone=${killzone ?? 'OFF_SESSION'} | day=${dayOfWeek ?? '?'}`,
   );
 
   return trade;
@@ -215,6 +227,18 @@ export function updatePaperPositions(
   for (let i = openPositions.length - 1; i >= 0; i--) {
     const pos = openPositions[i]!;
     pos.lastCheckPrice = currentPrice;
+
+    // ── Update MAE/MFE (solo para posiciones filled) ──────
+    if (pos.entryFilled && pos.trade.entryPrice) {
+      const entryPrice = pos.trade.entryPrice;
+      const priceMoveRaw = pos.trade.direction === 'LONG'
+        ? currentPrice - entryPrice
+        : entryPrice - currentPrice;
+      const priceMovePct = (priceMoveRaw / entryPrice) * 100;
+
+      if (priceMovePct < pos.mae) pos.mae = priceMovePct;
+      if (priceMovePct > pos.mfe) pos.mfe = priceMovePct;
+    }
 
     // ── Fill pending entries ──────────────────────────────
     if (!pos.entryFilled) {
