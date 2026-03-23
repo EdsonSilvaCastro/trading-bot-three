@@ -12,7 +12,7 @@ function getDashboardClient(): SupabaseClient | null {
   if (dashboardInstance) return dashboardInstance;
 
   const url = process.env['DASHBOARD_SUPABASE_URL'];
-  const key = process.env['DASHBOARD_SUPABASE_ANON_KEY'];
+  const key = process.env['DASHBOARD_SUPABASE_SERVICE_KEY'] || process.env['DASHBOARD_SUPABASE_ANON_KEY'];
 
   if (!url || !key) return null;
 
