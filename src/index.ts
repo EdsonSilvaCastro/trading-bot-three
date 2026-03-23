@@ -8,6 +8,7 @@ import cron from 'node-cron';
 import rootLogger, { createModuleLogger } from './monitoring/logger.js';
 import { initTelegramBot, sendAlert, sendDailyBias, setBotState, isManualKillSwitchActive } from './monitoring/telegramBot.js';
 import { getSupabaseClient } from './database/supabase.js';
+import { sendHeartbeat, checkDashboardCommands } from './database/dashboardClient.js';
 import { collectAll, collectTimeframe } from './collector/candleCollector.js';
 import { detectAndStoreSwings } from './analyzer/swingDetector.js';
 import { getSessionStatus, isKillzoneActive, getCurrentSession, getSessionHighLow } from './engine/sessionFilter.js';
@@ -237,6 +238,13 @@ function scheduleCronJobs(): void {
   // Every 5 minutes: log session status
   cron.schedule('*/5 * * * *', () => {
     log.info(`[Session] ${getSessionStatus()} | Killzone: ${isKillzoneActive() ? 'ACTIVE' : 'inactive'}`);
+  });
+
+  // Every minute: check dashboard commands + send heartbeat
+  cron.schedule('* * * * *', async () => {
+    await checkDashboardCommands(() => process.exit(0));
+    const activePositions = getOpenPositions().length;
+    await sendHeartbeat(0, activePositions);
   });
 
   log.info('Cron jobs scheduled (Phase 3)');
